@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  - job_name: 'blackbox-exporter'
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]                    
+    static_configs:
+      - targets:
+        - http://Webserver:80/             # probe your Webserver
+        - http://Webserver2:80/             # probe Webserver2
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target         # pass __address__ as "target" param
+      - source_labels: [__param_target]
+        target_label: instance               # put the target value into "instance" label
+      - target_label: __address__
+        replacement: BlackboxExporter:9115          # blackbox exporter address (host:port)
+
