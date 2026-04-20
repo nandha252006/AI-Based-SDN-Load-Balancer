@@ -9,26 +9,29 @@ import csv
 # =========================
 # 1️⃣ Set base directories
 # =========================
-BASE_DIR_MODEL = "/home/alanwalker/Project/AI"
-BASE_DIR_DATA  = "/home/alanwalker/Project/Data"
+BASE_DIR_MODEL = "/home/alanwalker/Project/AI"       # AI model files
+BASE_DIR_DATA  = "/home/alanwalker/Project/Data"    # Metrics CSV files
 
+# Model and preprocessing files
 MODEL_PATH   = os.path.join(BASE_DIR_MODEL, "sdn_health_model.pkl")
 SCALER_PATH  = os.path.join(BASE_DIR_MODEL, "scaler.pkl")
 ENCODER_PATH = os.path.join(BASE_DIR_MODEL, "label_encoder.pkl")
 
+# CSV metrics for containers / web servers
 container1_csv = os.path.join(BASE_DIR_DATA, "Web1_metrics_full.csv")
 container2_csv = os.path.join(BASE_DIR_DATA, "Web2_metrics_full.csv")
 
+# Output CSV for logging predictions
 output_csv = os.path.join(BASE_DIR_DATA, "container_comparison_output.csv")
 
-# Create output CSV if not exists
+# Create output CSV with headers if it doesn't exist
 if not os.path.exists(output_csv):
     with open(output_csv, mode='w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "avg_score_container1", "avg_score_container2", "best_container"])
 
 # =========================
-# 2️⃣ Load model
+# 2️⃣ Load AI model & preprocessors
 # =========================
 print("🔹 Loading AI model and preprocessing tools...")
 model = joblib.load(MODEL_PATH)
@@ -37,7 +40,7 @@ encoder = joblib.load(ENCODER_PATH)
 print("✅ Model, scaler, and encoder loaded successfully.\n")
 
 # =========================
-# 3️⃣ Features
+# 3️⃣ Define features (exact order from training)
 # =========================
 MODEL_FEATURES = [
     'cpu_usage', 'memory_usage', 'latency_seconds',
@@ -47,50 +50,41 @@ MODEL_FEATURES = [
 ]
 
 # =========================
-# 4️⃣ Tracking
+# 4️⃣ Setup real-time tracking
 # =========================
-processed_rows = {"container1": 0, "container2": 0}
-window_size = 5
+processed_rows = {"container1": 0, "container2": 0}  # tracks last row processed
+window_size = 5  # number of recent batches to smooth score
 rolling_scores = {"container1": [], "container2": []}
 
 # =========================
-# 5️⃣ Functions
+# 5️⃣ Helper functions
 # =========================
 def preprocess_and_predict(df):
-    """Safe preprocessing + prediction"""
+    """Scale metrics and predict health score"""
 
-    # 🚨 Handle empty input
+    # 🚨 Handle empty input EARLY
     if df is None or df.empty:
         return None, []
 
     try:
         df_selected = df[MODEL_FEATURES]
     except KeyError:
-        print("⚠️ Missing expected columns, skipping batch")
         return None, []
 
-    # 🚨 Handle empty after selection
+    # 🚨 CRITICAL FIX
     if df_selected.empty:
         return None, []
 
-    try:
-        scaled = scaler.transform(df_selected)
-    except Exception as e:
-        print("⚠️ Scaling error:", e)
-        return None, []
+    # Transform features
+    scaled = scaler.transform(df_selected)
 
-    try:
-        preds = model.predict(scaled)
-    except Exception as e:
-        print("⚠️ Prediction error:", e)
-        return None, []
+    preds = model.predict(scaled)
 
     try:
         decoded = encoder.inverse_transform(preds)
     except:
         decoded = preds
 
-    # Convert prediction → score
     if np.issubdtype(preds.dtype, np.number):
         score = np.mean(preds)
     else:
@@ -99,68 +93,41 @@ def preprocess_and_predict(df):
 
     return score, decoded
 
-
 def get_new_rows(csv_path, last_idx):
-    """Safely read new rows from CSV"""
+    """Return new rows from CSV since last processed index"""
     if not os.path.exists(csv_path):
         return pd.DataFrame(), last_idx
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        print("⚠️ CSV read error:", e)
-        return pd.DataFrame(), last_idx
-
+    df = pd.read_csv(csv_path)
     new_rows = df.iloc[last_idx:]
     last_idx = len(df)
-
     return new_rows, last_idx
 
-
 # =========================
-# 6️⃣ Real-time loop
+# 6️⃣ Real-time monitoring loop
 # =========================
 print("⏱ Starting real-time container evaluation...\n")
-
 while True:
-    # ---- Container 1 ----
-    new_rows1, processed_rows["container1"] = get_new_rows(
-        container1_csv, processed_rows["container1"]
-    )
-
-    if new_rows1.empty:
-        print("⚠️ No new data for Container1")
-
-    score1, _ = preprocess_and_predict(new_rows1)
-
-    if score1 is not None and isinstance(score1, (int, float)):
+    # ---- Container 1 / Web1 ----
+    new_rows1, processed_rows["container1"] = get_new_rows(container1_csv, processed_rows["container1"])
+    score1, pred1 = preprocess_and_predict(new_rows1)
+    if score1 != 0:
         rolling_scores["container1"].append(score1)
         if len(rolling_scores["container1"]) > window_size:
             rolling_scores["container1"].pop(0)
 
-    # ---- Container 2 ----
-    new_rows2, processed_rows["container2"] = get_new_rows(
-        container2_csv, processed_rows["container2"]
-    )
-
-    if new_rows2.empty:
-        print("⚠️ No new data for Container2")
-
-    score2, _ = preprocess_and_predict(new_rows2)
-
-    if score2 is not None and isinstance(score2, (int, float)):
+    # ---- Container 2 / Web2 ----
+    new_rows2, processed_rows["container2"] = get_new_rows(container2_csv, processed_rows["container2"])
+    score2, pred2 = preprocess_and_predict(new_rows2)
+    if score2 != 0:
         rolling_scores["container2"].append(score2)
         if len(rolling_scores["container2"]) > window_size:
             rolling_scores["container2"].pop(0)
 
-    # ---- Compute averages safely ----
-    valid_scores1 = [s for s in rolling_scores["container1"] if isinstance(s, (int, float))]
-    valid_scores2 = [s for s in rolling_scores["container2"] if isinstance(s, (int, float))]
+    # ---- Compute rolling average score ----
+    avg_score1 = np.mean(rolling_scores["container1"]) if rolling_scores["container1"] else 0
+    avg_score2 = np.mean(rolling_scores["container2"]) if rolling_scores["container2"] else 0
 
-    avg_score1 = np.mean(valid_scores1) if valid_scores1 else 0
-    avg_score2 = np.mean(valid_scores2) if valid_scores2 else 0
-
-    # ---- Decide best ----
+    # ---- Decide best container ----
     if avg_score1 > avg_score2:
         best_container = "WEB1 / CONTAINER 1"
     elif avg_score2 > avg_score1:
@@ -168,19 +135,15 @@ while True:
     else:
         best_container = "BOTH EQUAL"
 
-    # ---- Output ----
+    # ---- Print results ----
     print(f"Container1={avg_score1:.3f} | Container2={avg_score2:.3f} --> Best: {best_container}")
 
-    # ---- Save results ----
+    # ---- Log results to CSV ----
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(output_csv, mode='a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([
-            timestamp,
-            round(avg_score1, 3),
-            round(avg_score2, 3),
-            best_container
-        ])
+        writer.writerow([timestamp, round(avg_score1,3), round(avg_score2,3), best_container])
 
-    # ---- Wait ----
-    time.sleep(5)
+    # ---- Wait before next check ----
+    time.sleep(6)  # adjust frequency as needed
+
